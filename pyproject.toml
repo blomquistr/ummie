@@ -14,3 +14,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.scripts]
+ummie = "ummie.main:cmd"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
