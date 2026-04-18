@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+dynamic = ["version"]
+name = "ummie"
+authors = [{name = "Ryan C. Blomquist", email = "blomquist.r@gmail.com"}]
+description = "A utility for installing mods for Pathfinder: Wrath of the Righteous via the command line on Mac OS"
+readme = "README.md"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
