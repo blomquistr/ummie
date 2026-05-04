@@ -9,6 +9,14 @@ import urllib.request
 import zipfile as _zipfile_mod
 
 import ummie.main as _main
+from ummie.config import (
+    Config,
+    GameConfig,
+    load_config,
+    resolve_game,
+    GAME_ENV_VAR,
+    CONFIG_PATH_ENV_VAR,
+)
 from ummie.main import (
     configure_params_xml,
     derive_mod_folder_name,
@@ -42,34 +50,166 @@ def _info_json(assembly: str | None = "MyMod.dll", mod_id: str | None = "MyMod")
     return json.dumps(info)
 
 
+def _wrath_config() -> GameConfig:
+    return GameConfig(env_var="WRATH_MODS_DIR", default_mods_dir="/default/Mods")
+
+
+# ── load_config ───────────────────────────────────────────────────────────────
+
+
+def test_load_config_returns_defaults_when_no_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(CONFIG_PATH_ENV_VAR, raising=False)
+    monkeypatch.setattr(
+        "ummie.config.DEFAULT_CONFIG_PATH", Path("/nonexistent/path/config.toml")
+    )
+    config = load_config()
+    assert "wrath" in config.games
+    assert "rogue-trader" in config.games
+    assert config.default_game == "wrath"
+
+
+def test_load_config_reads_toml_file(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[games.wrath]\n'
+        'env_var = "WRATH_MODS_DIR"\n'
+        'default_mods_dir = "/custom/Mods"\n'
+        '\n'
+        'default_game = "wrath"\n',
+        encoding="utf-8",
+    )
+    config = load_config(config_file)
+    assert config.games["wrath"].default_mods_dir == "/custom/Mods"
+    assert config.default_game == "wrath"
+
+
+def test_load_config_reads_game_dir_from_toml(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[games.rogue-trader]\n'
+        'env_var = "ROGUE_TRADER_MODS_DIR"\n'
+        'default_mods_dir = "/rt/mods"\n'
+        'game_dir = "/Applications/WH40KRT.app"\n',
+        encoding="utf-8",
+    )
+    config = load_config(config_file)
+    assert config.games["rogue-trader"].game_dir == "/Applications/WH40KRT.app"
+
+
+def test_load_config_uses_env_var_for_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "via_env.toml"
+    config_file.write_text(
+        '[games.wrath]\n'
+        'env_var = "WRATH_MODS_DIR"\n'
+        'default_mods_dir = "/env/Mods"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(CONFIG_PATH_ENV_VAR, str(config_file))
+    config = load_config()
+    assert config.games["wrath"].default_mods_dir == "/env/Mods"
+
+
+def test_load_config_explicit_path_beats_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_file = tmp_path / "env.toml"
+    env_file.write_text(
+        '[games.wrath]\nenv_var = "WRATH_MODS_DIR"\ndefault_mods_dir = "/env/Mods"\n',
+        encoding="utf-8",
+    )
+    explicit_file = tmp_path / "explicit.toml"
+    explicit_file.write_text(
+        '[games.wrath]\nenv_var = "WRATH_MODS_DIR"\ndefault_mods_dir = "/explicit/Mods"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(CONFIG_PATH_ENV_VAR, str(env_file))
+    config = load_config(explicit_file)
+    assert config.games["wrath"].default_mods_dir == "/explicit/Mods"
+
+
+def test_load_config_falls_back_to_defaults_when_no_games_section(
+    tmp_path: Path,
+) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('default_game = "rogue-trader"\n', encoding="utf-8")
+    config = load_config(config_file)
+    assert "wrath" in config.games
+    assert config.default_game == "rogue-trader"
+
+
+# ── resolve_game ──────────────────────────────────────────────────────────────
+
+
+def _two_game_config() -> Config:
+    return Config(
+        games={
+            "wrath": GameConfig(env_var="WRATH_MODS_DIR", default_mods_dir="/w"),
+            "rogue-trader": GameConfig(env_var="RT_MODS_DIR", default_mods_dir="/rt"),
+        },
+        default_game="wrath",
+    )
+
+
+def test_resolve_game_arg_beats_env_and_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(GAME_ENV_VAR, "rogue-trader")
+    assert resolve_game("wrath", _two_game_config()) == "wrath"
+
+
+def test_resolve_game_env_beats_config_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(GAME_ENV_VAR, "rogue-trader")
+    assert resolve_game(None, _two_game_config()) == "rogue-trader"
+
+
+def test_resolve_game_falls_back_to_config_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(GAME_ENV_VAR, raising=False)
+    config = Config(
+        games={"wrath": GameConfig(env_var="X", default_mods_dir="/w")},
+        default_game="wrath",
+    )
+    assert resolve_game(None, config) == "wrath"
+
+
+def test_resolve_game_raises_on_unknown_env_game(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(GAME_ENV_VAR, "unknown-game")
+    with pytest.raises(SystemExit):
+        resolve_game(None, _two_game_config())
+
+
 # ── resolve_mods_dir ──────────────────────────────────────────────────────────
 
 
 def test_resolve_mods_dir_arg_takes_priority(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WRATH_MODS_DIR", "/from/env")
-    assert resolve_mods_dir("/from/arg", "wrath") == Path("/from/arg")
+    assert resolve_mods_dir("/from/arg", _wrath_config()) == Path("/from/arg")
 
 
 def test_resolve_mods_dir_falls_back_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WRATH_MODS_DIR", "/from/env")
-    assert resolve_mods_dir(None, "wrath") == Path("/from/env")
+    assert resolve_mods_dir(None, _wrath_config()) == Path("/from/env")
 
 
 def test_resolve_mods_dir_raises_without_input(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WRATH_MODS_DIR", raising=False)
     with pytest.raises(SystemExit):
-        resolve_mods_dir(None, "wrath")
+        resolve_mods_dir(None, _wrath_config())
 
 
 def test_resolve_mods_dir_rogue_trader_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    gc = GameConfig(env_var="ROGUE_TRADER_MODS_DIR", default_mods_dir="/rt/default")
     monkeypatch.setenv("ROGUE_TRADER_MODS_DIR", "/rt/mods")
-    assert resolve_mods_dir(None, "rogue-trader") == Path("/rt/mods")
+    assert resolve_mods_dir(None, gc) == Path("/rt/mods")
 
 
 def test_resolve_mods_dir_rogue_trader_default_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    gc = GameConfig(
+        env_var="ROGUE_TRADER_MODS_DIR",
+        default_mods_dir="~/Library/com.Owlcat-Games.Warhammer-40000-Rogue-Trader/UnityModManager",
+    )
     monkeypatch.delenv("ROGUE_TRADER_MODS_DIR", raising=False)
     with pytest.raises(SystemExit) as exc_info:
-        resolve_mods_dir(None, "rogue-trader")
+        resolve_mods_dir(None, gc)
     assert "ROGUE_TRADER_MODS_DIR" in str(exc_info.value)
     assert "com.Owlcat-Games.Warhammer-40000-Rogue-Trader" in str(exc_info.value)
 

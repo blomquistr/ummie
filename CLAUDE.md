@@ -35,13 +35,24 @@ python -m venv .venv
 .venv/bin/ummie --dest /path/to/Mods --dry-run uninstall --mod-names MyMod
 ```
 
-The mods directory can also be set via the `WRATH_MODS_DIR` environment variable to avoid passing `--dest` on every invocation.
+The mods directory can also be set via the game-specific env var (e.g. `WRATH_MODS_DIR`) to avoid passing `--dest` on every invocation. The active game can be set via `UMMIE_GAME` to avoid passing `--game`.
 
 ## Architecture
 
-All logic lives in a single module: `src/ummie/main.py`. The `cmd()` function is the CLI entry point (registered as the `ummie` script in `pyproject.toml`). Everything else is a pure function.
+Logic is split across two modules:
 
-**Install flow:** `cmd()` → `resolve_mods_dir()` → `install_mod()` → `detect_structure()` → `derive_mod_folder_name()`
+- **`src/ummie/config.py`** — `GameConfig` and `Config` dataclasses, built-in game defaults, TOML config loading (`load_config`), and game/config-path resolution (`resolve_game`).
+- **`src/ummie/main.py`** — all mod operations as pure functions; `cmd()` is the CLI entry point registered in `pyproject.toml`.
+
+**Config resolution order** (highest priority first):
+
+| Setting | CLI flag | Env var | Config file | Hardcoded default |
+|---|---|---|---|---|
+| Config file path | `--config` | `UMMIE_CONFIG` | — | `~/.config/ummie/config.toml` |
+| Active game | `--game` | `UMMIE_GAME` | `default_game` | `wrath` |
+| Mods directory | `--dest` | per-game `env_var` | — | error with hint |
+
+**Install flow:** `cmd()` → `load_config()` → `resolve_game()` → `resolve_mods_dir()` → `install_mod()` → `detect_structure()` → `derive_mod_folder_name()`
 
 - `detect_structure(zf)` inspects the zip for `Info.json`, determines whether the layout is `flat` (files at zip root) or `nested` (files inside a single top-level folder), and reads the mod metadata.
 - `derive_mod_folder_name(info, zip_filename)` picks the filesystem folder name from `Info.json`: prefers `AssemblyName` (stem only, strips `.dll`), falls back to `Id`.
@@ -49,14 +60,39 @@ All logic lives in a single module: `src/ummie/main.py`. The `cmd()` function is
 
 **Uninstall flow:** `cmd()` → `resolve_mods_dir()` → `uninstall_mod()` — removes the named folder with `shutil.rmtree`.
 
+## Config File Format
+
+The optional TOML config at `~/.config/ummie/config.toml` (or `UMMIE_CONFIG`) looks like:
+
+```toml
+default_game = "wrath"
+
+[games.wrath]
+env_var = "WRATH_MODS_DIR"
+default_mods_dir = "/Applications/Pathfinder Wrath of the Righteous/Mods"
+
+[games.rogue-trader]
+env_var = "ROGUE_TRADER_MODS_DIR"
+default_mods_dir = "~/Library/Application Support/com.Owlcat-Games.Warhammer-40000-Rogue-Trader/UnityModManager"
+game_dir = "/Applications/Warhammer 40,000 Rogue Trader/WH40KRT.app"
+```
+
+If the file is absent or contains no `[games]` section, the built-in defaults from `config.py` are used.
+
 ## Tests
 
 Tests are in `tests/test_main.py`. All zip fixtures are created in-memory using `zipfile.ZipFile` + pytest's `tmp_path` fixture — no real mod files are needed. The `_make_zip` and `_info_json` helpers at the top of the test file are the primary tools for constructing test inputs.
 
 ## Adding Game Support
 
-To support another Unity game (e.g. Pathfinder: Kingmaker, Warhammer 40K: Rogue Trader):
+To support another Unity game, add a new `GameConfig` entry to `_DEFAULT_GAMES` in `src/ummie/config.py`:
 
-1. Add a new `DEFAULT_MODS_DIR` constant for the game's expected mods path.
-2. Add a `--game` flag (or a new subcommand) to `cmd()` that selects which directory constant to use as the fallback hint in the `resolve_mods_dir` error message.
-3. The install/uninstall logic itself is game-agnostic — it depends only on the Unity Mod Manager `Info.json` convention, which all supported games share.
+```python
+"my-game": GameConfig(
+    env_var="MY_GAME_MODS_DIR",
+    default_mods_dir="/Applications/My Game/Mods",
+    game_dir=None,  # set if the game needs the setup subcommand
+),
+```
+
+No changes to `main.py` are needed — the install/uninstall logic is game-agnostic and depends only on the Unity Mod Manager `Info.json` convention. Users can also add games via a config file without touching the code.

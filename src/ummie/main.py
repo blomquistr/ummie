@@ -7,48 +7,25 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
-from typing import Literal, TypedDict
+
+from ummie.config import Config, GameConfig, load_config, resolve_game
 
 
-Game = Literal["wrath", "rogue-trader"]
-
-
-class GameConfig(TypedDict):
-    env_var: str
-    default_mods_dir: str
-
-
-GAME_CONFIGS: dict[str, GameConfig] = {
-    "wrath": {
-        "env_var": "WRATH_MODS_DIR",
-        "default_mods_dir": "/Applications/Pathfinder Wrath of the Righteous/Mods",
-    },
-    "rogue-trader": {
-        "env_var": "ROGUE_TRADER_MODS_DIR",
-        "default_mods_dir": os.path.expanduser(
-            "~/Library/Application Support"
-            "/com.Owlcat-Games.Warhammer-40000-Rogue-Trader/UnityModManager"
-        ),
-    },
-}
-
-DEFAULT_ROGUE_TRADER_GAME_DIR = "/Applications/Warhammer 40,000 Rogue Trader/WH40KRT.app"
 HARMONY_DLL_NET_TARGET = "net472"
 HARMONY_GITHUB_API = "https://api.github.com/repos/pardeike/Harmony/releases/latest"
 
 
-def resolve_mods_dir(dest_arg: str | None, game: Game) -> Path:
+def resolve_mods_dir(dest_arg: str | None, game_config: GameConfig) -> Path:
     """Resolve the mods directory from CLI arg, environment, or raise."""
     if dest_arg:
         return Path(dest_arg)
-    config = GAME_CONFIGS[game]
-    from_env = os.getenv(config["env_var"])
+    from_env = os.getenv(game_config.env_var)
     if from_env:
         return Path(from_env)
     raise SystemExit(
         f"Error: no mods directory specified.\n"
-        f"Use --dest <path> or set the {config['env_var']} environment variable.\n"
-        f"Default expected path: {config['default_mods_dir']}"
+        f"Use --dest <path> or set the {game_config.env_var} environment variable.\n"
+        f"Default expected path: {game_config.default_mods_dir}"
     )
 
 
@@ -288,10 +265,21 @@ def cmd() -> None:
         description="Install and uninstall mods for Unity-based games.",
     )
     parser.add_argument(
+        "--config",
+        metavar="PATH",
+        help=(
+            f"Path to a TOML config file. "
+            f"Overrides the UMMIE_CONFIG environment variable."
+        ),
+    )
+    parser.add_argument(
         "--game",
-        choices=["wrath", "rogue-trader"],
-        default="wrath",
-        help="Game to manage mods for (default: wrath).",
+        metavar="GAME",
+        default=None,
+        help=(
+            "Game to manage mods for. "
+            "Overrides the UMMIE_GAME environment variable and config file default."
+        ),
     )
     parser.add_argument(
         "--dest",
@@ -330,17 +318,24 @@ def cmd() -> None:
 
     setup_parser = subparsers.add_parser(
         "setup",
-        help="One-time Rogue Trader mod setup (Params.xml hotkey + 0Harmony.dll update).",
+        help="One-time game mod setup (Params.xml hotkey + 0Harmony.dll update).",
     )
     setup_parser.add_argument(
         "--game-dir",
         metavar="PATH",
-        default=DEFAULT_ROGUE_TRADER_GAME_DIR,
-        help="Path to WH40KRT.app (default: %(default)s).",
+        default=None,
+        help="Path to the game app bundle (default: from game config).",
     )
 
     args = parser.parse_args()
-    mods_dir = resolve_mods_dir(args.dest, args.game)
+
+    config: Config = load_config(Path(args.config) if args.config else None)
+    game: str = resolve_game(args.game, config)
+    if game not in config.games:
+        valid = ", ".join(config.games)
+        sys.exit(f"Error: unknown game {game!r}. Valid games: {valid}")
+    game_config: GameConfig = config.games[game]
+    mods_dir = resolve_mods_dir(args.dest, game_config)
 
     errors: list[str] = []
 
@@ -361,12 +356,17 @@ def cmd() -> None:
     elif args.command == "setup":
         if args.game != "rogue-trader":
             sys.exit("Error: 'setup' is only supported for --game rogue-trader.")
+        game_dir_str = args.game_dir or game_config.game_dir
+        if game_dir_str is None:
+            sys.exit(
+                "Error: --game-dir required (no default game_dir configured for this game)."
+            )
         try:
             configure_params_xml(mods_dir, dry_run=args.dry_run)
         except SystemExit as e:
             errors.append(str(e))
         try:
-            update_harmony_dll(Path(args.game_dir), dry_run=args.dry_run)
+            update_harmony_dll(Path(game_dir_str), dry_run=args.dry_run)
         except SystemExit as e:
             errors.append(str(e))
 
